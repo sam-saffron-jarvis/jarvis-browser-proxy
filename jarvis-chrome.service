@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis shared Chromium/Chrome
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/launch-jarvis-chrome.sh
+ExecStop=/usr/bin/pkill -f '--class=JarvisChrome'
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
