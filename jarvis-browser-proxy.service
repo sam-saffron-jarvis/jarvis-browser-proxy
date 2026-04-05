@@ -1,0 +1,13 @@
+[Unit]
+Description=Jarvis browser proxy
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/jarvis-browser-proxy.env
+ExecStart=%h/.local/bin/jarvis-browser-proxy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

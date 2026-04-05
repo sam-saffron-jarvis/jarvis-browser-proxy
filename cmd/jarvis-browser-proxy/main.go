@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -9,21 +10,25 @@ import (
 )
 
 func main() {
-	token := os.Getenv("JARVIS_BROWSER_PROXY_TOKEN")
-	if token == "" {
-		log.Fatal("JARVIS_BROWSER_PROXY_TOKEN is required")
+	addr := flag.String("addr", getenvDefault("JARVIS_BROWSER_PROXY_ADDR", "127.0.0.1:8787"), "listen address")
+	token := flag.String("token", getenvDefault("JARVIS_BROWSER_PROXY_TOKEN", ""), "shared API token")
+	browserCmd := flag.String("browser-command", getenvDefault("JARVIS_BROWSER_COMMAND", "jarvis-browser"), "browser control command")
+	chromeBaseURL := flag.String("chrome-base-url", getenvDefault("JARVIS_CHROME_BASE_URL", "http://127.0.0.1:9222"), "upstream chrome devtools base URL")
+	flag.Parse()
+
+	if *token == "" {
+		log.Fatal("token is required via -token or JARVIS_BROWSER_PROXY_TOKEN")
 	}
 
 	cfg := proxy.Config{
-		Token:         token,
-		BrowserCmd:    getenvDefault("JARVIS_BROWSER_COMMAND", "jarvis-browser"),
-		ChromeBaseURL: getenvDefault("JARVIS_CHROME_BASE_URL", "http://127.0.0.1:9222"),
+		Token:         *token,
+		BrowserCmd:    *browserCmd,
+		ChromeBaseURL: *chromeBaseURL,
 	}
 
-	addr := getenvDefault("JARVIS_BROWSER_PROXY_ADDR", "127.0.0.1:8787")
 	server := proxy.NewServer(cfg, nil)
-	log.Printf("jarvis-browser-proxy listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, server.Routes()))
+	log.Printf("jarvis-browser-proxy listening on %s", *addr)
+	log.Fatal(http.ListenAndServe(*addr, server.Routes()))
 }
 
 func getenvDefault(key, fallback string) string {

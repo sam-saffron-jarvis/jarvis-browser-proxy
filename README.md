@@ -6,21 +6,78 @@ What you get:
 
 - a dedicated `jarvis-chrome` browser profile
 - a normal Wayland window on your desktop
-- a fixed Chrome DevTools port (`9222`) that stays bound to `127.0.0.1`
+- Chrome DevTools bound to `127.0.0.1:9222`
 - a tiny wrapper command: `jarvis-browser start|stop|status|restart`
-- a small Go HTTP service that can:
+- a small Go proxy that can:
   - authenticate requests from Jarvis
   - start/stop/status the browser via `jarvis-browser`
   - proxy `/json/version`, `/json/list`, `/json/protocol`
   - proxy DevTools websockets without exposing raw CDP on the network
+- a one-shot installer that copies files, builds the Go binary, creates a config file, and installs user services
 
-## Files in this directory
+## Quick install
+
+From this directory:
+
+```bash
+bash install.sh
+```
+
+Then, once in your logged-in desktop session:
+
+```bash
+systemctl --user import-environment \
+  WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY \
+  DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
+
+dbus-update-activation-environment --systemd \
+  WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY \
+  DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
+```
+
+Then test:
+
+```bash
+jarvis-browser start
+jarvis-browser status
+systemctl --user start jarvis-browser-proxy
+systemctl --user status jarvis-browser-proxy --no-pager
+```
+
+Your generated proxy token is stored in:
+
+```bash
+~/.config/jarvis-browser-proxy.env
+```
+
+Show it with:
+
+```bash
+sed -n 's/^JARVIS_BROWSER_PROXY_TOKEN=//p' ~/.config/jarvis-browser-proxy.env
+```
+
+## Installed files
+
+Browser bits:
+
+- `~/.local/bin/jarvis-browser`
+- `~/.local/bin/launch-jarvis-chrome.sh`
+- `~/.config/systemd/user/jarvis-chrome.service`
+
+Proxy bits:
+
+- `~/.local/bin/jarvis-browser-proxy`
+- `~/.config/systemd/user/jarvis-browser-proxy.service`
+- `~/.config/jarvis-browser-proxy.env`
+
+## Files in this repo
 
 - `README.md` — this file
+- `install.sh` — installs browser bits, builds proxy, creates config, reloads user units
 - `launch-jarvis-chrome.sh` — starts the dedicated browser instance
 - `jarvis-browser` — helper command with `start|stop|restart|status`
 - `jarvis-chrome.service` — systemd user unit for the browser
-- `install.sh` — copies browser files into place and prints next steps
+- `jarvis-browser-proxy.service` — systemd user unit for the Go proxy
 - `go.mod` — Go module for the proxy service
 - `cmd/jarvis-browser-proxy/main.go` — proxy service entrypoint
 - `proxy/server.go` — proxy implementation
@@ -35,66 +92,35 @@ What you get:
   - `google-chrome-stable`
   - `google-chrome`
   - `chromium-browser`
-- `curl` exists for status checks
-- Go is installed if you want to build the proxy binary yourself
+- Go is installed if you want `install.sh` to build the proxy automatically
 
-## Install the browser bits on the host
+## Manual build / run
 
-From this directory:
-
-```bash
-bash install.sh
-```
-
-That will copy:
-
-- `jarvis-chrome.service` → `~/.config/systemd/user/`
-- `jarvis-browser` → `~/.local/bin/`
-- `launch-jarvis-chrome.sh` → `~/.local/bin/`
-
-## One-time environment import
-
-For GUI apps launched by `systemd --user`, you want your current desktop env imported so the browser can appear in the session.
-
-Run this once in your logged-in desktop session:
-
-```bash
-systemctl --user import-environment \
-  WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY \
-  DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
-
-dbus-update-activation-environment --systemd \
-  WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY \
-  DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
-```
-
-## Start / stop / status locally
-
-```bash
-jarvis-browser start
-jarvis-browser status
-jarvis-browser stop
-```
-
-## Build the proxy
+If you do not want the service unit yet:
 
 ```bash
 go build -o jarvis-browser-proxy ./cmd/jarvis-browser-proxy
+./jarvis-browser-proxy -token "$(sed -n 's/^JARVIS_BROWSER_PROXY_TOKEN=//p' ~/.config/jarvis-browser-proxy.env)"
 ```
 
-## Run the proxy
+Flags are available for all config if you want them:
+
+```bash
+./jarvis-browser-proxy \
+  -addr 127.0.0.1:8787 \
+  -token your-token \
+  -browser-command "$HOME/.local/bin/jarvis-browser" \
+  -chrome-base-url http://127.0.0.1:9222
+```
+
+Environment variables work too:
 
 ```bash
 export JARVIS_BROWSER_PROXY_TOKEN='pick-a-token'
-./jarvis-browser-proxy
-```
-
-Optional env vars:
-
-```bash
 export JARVIS_BROWSER_PROXY_ADDR='127.0.0.1:8787'
 export JARVIS_BROWSER_COMMAND="$HOME/.local/bin/jarvis-browser"
 export JARVIS_CHROME_BASE_URL='http://127.0.0.1:9222'
+./jarvis-browser-proxy
 ```
 
 ## API
