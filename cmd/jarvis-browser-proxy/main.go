@@ -25,6 +25,8 @@ func main() {
 	workspace := flag.String("workspace", getenvDefault("JARVIS_CHROME_WORKSPACE", "9"), "Hyprland workspace to move the browser to; empty disables the move")
 	startupWait := flag.Duration("startup-wait", getenvDurationDefault("JARVIS_CHROME_STARTUP_WAIT", 15*time.Second), "how long to wait for CDP after launch")
 	stopWait := flag.Duration("stop-wait", getenvDurationDefault("JARVIS_CHROME_STOP_WAIT", 10*time.Second), "how long to wait before force-killing the browser")
+	healthCheckInterval := flag.Duration("health-check-interval", getenvDurationDefault("JARVIS_CHROME_HEALTH_CHECK_INTERVAL", 30*time.Second), "how often to probe and self-heal browser/CDP health; 0 disables watchdog")
+	restartCooldown := flag.Duration("restart-cooldown", getenvDurationDefault("JARVIS_CHROME_RESTART_COOLDOWN", 15*time.Second), "minimum gap between automatic recovery restarts")
 	flag.Parse()
 
 	if *token == "" {
@@ -32,18 +34,20 @@ func main() {
 	}
 
 	cfg := proxy.Config{
-		Token:         *token,
-		ChromeBaseURL: *chromeBaseURL,
-		BrowserBinary: *browserBinary,
-		ProfileDir:    *profileDir,
-		DownloadsDir:  *downloadsDir,
-		StateDir:      *stateDir,
-		DebugHost:     *debugHost,
-		DebugPort:     *debugPort,
-		Homepage:      *homepage,
-		Workspace:     *workspace,
-		StartupWait:   *startupWait,
-		StopWait:      *stopWait,
+		Token:               *token,
+		ChromeBaseURL:       *chromeBaseURL,
+		BrowserBinary:       *browserBinary,
+		ProfileDir:          *profileDir,
+		DownloadsDir:        *downloadsDir,
+		StateDir:            *stateDir,
+		DebugHost:           *debugHost,
+		DebugPort:           *debugPort,
+		Homepage:            *homepage,
+		Workspace:           *workspace,
+		StartupWait:         *startupWait,
+		StopWait:            *stopWait,
+		HealthCheckInterval: *healthCheckInterval,
+		RestartCooldown:     *restartCooldown,
 	}
 
 	server := proxy.NewServer(cfg, nil)

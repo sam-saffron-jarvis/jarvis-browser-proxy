@@ -19,18 +19,20 @@ import (
 )
 
 type Config struct {
-	Token         string
-	ChromeBaseURL string
-	BrowserBinary string
-	ProfileDir    string
-	DownloadsDir  string
-	StateDir      string
-	DebugHost     string
-	DebugPort     int
-	Homepage      string
-	Workspace     string
-	StartupWait   time.Duration
-	StopWait      time.Duration
+	Token               string
+	ChromeBaseURL       string
+	BrowserBinary       string
+	ProfileDir          string
+	DownloadsDir        string
+	StateDir            string
+	DebugHost           string
+	DebugPort           int
+	Homepage            string
+	Workspace           string
+	StartupWait         time.Duration
+	StopWait            time.Duration
+	HealthCheckInterval time.Duration
+	RestartCooldown     time.Duration
 }
 
 type CommandResult struct {
@@ -44,9 +46,12 @@ type ProcessManager interface {
 }
 
 type BrowserManager struct {
-	cfg    Config
-	client *http.Client
-	mu     sync.Mutex
+	cfg               Config
+	client            *http.Client
+	mu                sync.Mutex
+	lastRestartAt     time.Time
+	restartCount      int
+	lastRestartReason string
 }
 
 type Server struct {
@@ -75,13 +80,19 @@ func NewServer(cfg Config, manager ProcessManager) *Server {
 	if cfg.StopWait == 0 {
 		cfg.StopWait = 10 * time.Second
 	}
+	if cfg.HealthCheckInterval == 0 {
+		cfg.HealthCheckInterval = 30 * time.Second
+	}
+	if cfg.RestartCooldown == 0 {
+		cfg.RestartCooldown = 15 * time.Second
+	}
 	if manager == nil {
 		manager = &BrowserManager{
 			cfg:    cfg,
 			client: &http.Client{Timeout: 1 * time.Second},
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		manager: manager,
 		client:  &http.Client{Timeout: 5 * time.Second},
@@ -89,6 +100,10 @@ func NewServer(cfg Config, manager ProcessManager) *Server {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+	if browserManager, ok := manager.(*BrowserManager); ok && cfg.HealthCheckInterval > 0 {
+		go browserManager.watchdog(cfg.HealthCheckInterval)
+	}
+	return s
 }
 
 func (s *Server) Routes() http.Handler {
@@ -139,7 +154,12 @@ func (s *Server) handleJSONProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.client.Get(strings.TrimRight(s.cfg.ChromeBaseURL, "/") + "/json/" + endpoint)
+	resp, err := s.getChromeJSON(endpoint)
+	if err != nil && s.shouldAutoRecover(err) {
+		if s.recoverBrowser("json proxy auto-recovery for /json/" + endpoint) {
+			resp, err = s.getChromeJSON(endpoint)
+		}
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
@@ -167,6 +187,10 @@ func (s *Server) handleJSONProxy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rewritten)
 }
 
+func (s *Server) getChromeJSON(endpoint string) (*http.Response, error) {
+	return s.client.Get(strings.TrimRight(s.cfg.ChromeBaseURL, "/") + "/json/" + endpoint)
+}
+
 func (s *Server) handleWebsocketProxy(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Token == "" || extractToken(r) != s.cfg.Token {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
@@ -175,18 +199,23 @@ func (s *Server) handleWebsocketProxy(w http.ResponseWriter, r *http.Request) {
 	devtoolsPath := strings.TrimPrefix(r.URL.Path, "/jarvis-browser/devtools/")
 	upstreamURL := wsBaseURL(s.cfg.ChromeBaseURL) + "/" + devtoolsPath
 
+	upstream, err := s.dialDevtools(upstreamURL)
+	if err != nil && s.shouldAutoRecover(err) {
+		if s.recoverBrowser("websocket proxy auto-recovery") {
+			upstream, err = s.dialDevtools(upstreamURL)
+		}
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
+	defer upstream.Close()
+
 	downstream, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer downstream.Close()
-
-	upstream, _, err := websocket.DefaultDialer.Dial(upstreamURL, nil)
-	if err != nil {
-		_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()), time.Now().Add(time.Second))
-		return
-	}
-	defer upstream.Close()
 
 	errCh := make(chan error, 2)
 	go proxyWebsocket(upstream, downstream, errCh)
@@ -201,11 +230,7 @@ func (m *BrowserManager) Run(action string) CommandResult {
 	case "stop":
 		return m.stop()
 	case "restart":
-		stopResult := m.stop()
-		if stopResult.ReturnCode != 0 {
-			return stopResult
-		}
-		return m.start()
+		return m.restart("api request")
 	case "status":
 		return m.statusResult(0, "")
 	default:
@@ -216,10 +241,16 @@ func (m *BrowserManager) Run(action string) CommandResult {
 func (m *BrowserManager) start() CommandResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.startLocked()
+}
 
+func (m *BrowserManager) startLocked() CommandResult {
 	running, pid := m.browserRunningLocked()
 	if running {
-		return m.statusResult(0, "")
+		if m.cdpReady() {
+			return m.statusResultLocked(0, "")
+		}
+		return m.restartLocked("start requested while CDP unhealthy")
 	}
 
 	if err := m.ensureDirs(); err != nil {
@@ -267,17 +298,21 @@ func (m *BrowserManager) start() CommandResult {
 		}
 	}
 
-	return m.statusResult(0, "")
+	return m.statusResultLocked(0, "")
 }
 
 func (m *BrowserManager) stop() CommandResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return m.stopLocked()
+}
+
+func (m *BrowserManager) stopLocked() CommandResult {
 	pid, err := m.readPID()
 	if err != nil || pid <= 0 || !processAlive(pid) {
 		m.removePIDIfMatches(pid)
-		return m.statusResult(0, "")
+		return m.statusResultLocked(0, "")
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -292,7 +327,7 @@ func (m *BrowserManager) stop() CommandResult {
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			m.removePIDIfMatches(pid)
-			return m.statusResult(0, "")
+			return m.statusResultLocked(0, "")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -308,19 +343,52 @@ func (m *BrowserManager) stop() CommandResult {
 		time.Sleep(100 * time.Millisecond)
 	}
 	m.removePIDIfMatches(pid)
-	return m.statusResult(0, "")
+	return m.statusResultLocked(0, "")
+}
+
+func (m *BrowserManager) restart(reason string) CommandResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.restartLocked(reason)
+}
+
+func (m *BrowserManager) restartLocked(reason string) CommandResult {
+	stopResult := m.stopLocked()
+	if stopResult.ReturnCode != 0 {
+		return stopResult
+	}
+	m.lastRestartAt = time.Now().UTC()
+	m.restartCount++
+	m.lastRestartReason = reason
+	return m.startLocked()
 }
 
 func (m *BrowserManager) statusResult(code int, stderr string) CommandResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.statusResultLocked(code, stderr)
+}
+
+func (m *BrowserManager) statusResultLocked(code int, stderr string) CommandResult {
+	cdpReady := m.cdpReady()
 	payload := map[string]any{
 		"browser_running": false,
-		"cdp_ready":       m.cdpReady(),
+		"cdp_ready":       cdpReady,
+		"healthy":         false,
 		"debug_url":       strings.TrimRight(m.cfg.ChromeBaseURL, "/") + "/json/version",
 		"workspace":       m.cfg.Workspace,
+		"restart_count":   m.restartCount,
+	}
+	if !m.lastRestartAt.IsZero() {
+		payload["last_restart_at"] = m.lastRestartAt.Format(time.RFC3339)
+	}
+	if m.lastRestartReason != "" {
+		payload["last_restart_reason"] = m.lastRestartReason
 	}
 	if pid, err := m.readPID(); err == nil && pid > 0 && processAlive(pid) {
 		payload["browser_running"] = true
 		payload["browser_pid"] = pid
+		payload["healthy"] = cdpReady
 	} else if pid > 0 {
 		m.removePIDIfMatches(pid)
 	}
@@ -401,6 +469,30 @@ func (m *BrowserManager) cdpReady() bool {
 	return resp.StatusCode < 400
 }
 
+func (m *BrowserManager) watchdog(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		m.ensureHealthy("watchdog detected unhealthy CDP")
+	}
+}
+
+func (m *BrowserManager) ensureHealthy(reason string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	running, _ := m.browserRunningLocked()
+	if !running || m.cdpReady() {
+		return false
+	}
+	if m.cfg.RestartCooldown > 0 && !m.lastRestartAt.IsZero() && time.Since(m.lastRestartAt) < m.cfg.RestartCooldown {
+		return false
+	}
+
+	result := m.restartLocked(reason)
+	return result.ReturnCode == 0
+}
+
 func (m *BrowserManager) pidFile() string {
 	return filepath.Join(m.cfg.StateDir, "browser.pid")
 }
@@ -445,6 +537,31 @@ func processAlive(pid int) bool {
 	}
 	err := syscall.Kill(pid, 0)
 	return err == nil
+}
+
+func (s *Server) dialDevtools(upstreamURL string) (*websocket.Conn, error) {
+	upstream, _, err := websocket.DefaultDialer.Dial(upstreamURL, nil)
+	return upstream, err
+}
+
+func (s *Server) recoverBrowser(reason string) bool {
+	if browserManager, ok := s.manager.(*BrowserManager); ok {
+		return browserManager.restart(reason).ReturnCode == 0
+	}
+	return s.manager.Run("restart").ReturnCode == 0
+}
+
+func (s *Server) shouldAutoRecover(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "i/o timeout")
 }
 
 func proxyWebsocket(src, dst *websocket.Conn, errCh chan<- error) {

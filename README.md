@@ -94,7 +94,11 @@ Common settings in that file:
 - `JARVIS_CHROME_WORKSPACE=9`
 - `JARVIS_CHROME_DEBUG_PORT=9222`
 - `JARVIS_CHROME_HOMEPAGE=about:blank`
+- `JARVIS_CHROME_HEALTH_CHECK_INTERVAL=30s`
+- `JARVIS_CHROME_RESTART_COOLDOWN=15s`
 - `JARVIS_CHROME_BROWSER=` (optional explicit browser binary)
+
+The proxy also self-heals: if Chrome is still running but CDP on `127.0.0.1:9222` is wedged, request-time recovery will restart the browser once and retry, and the background watchdog will recycle unhealthy browser/CDP state automatically.
 
 If you edit the env file, reload and restart the service:
 

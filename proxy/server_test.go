@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,10 +16,14 @@ import (
 )
 
 type fakeManager struct {
-	results map[string]CommandResult
+	results      map[string]CommandResult
+	restartCalls int
 }
 
-func (f fakeManager) Run(action string) CommandResult {
+func (f *fakeManager) Run(action string) CommandResult {
+	if action == "restart" {
+		f.restartCalls++
+	}
 	return f.results[action]
 }
 
@@ -46,8 +52,14 @@ func authRequest(t *testing.T, method, rawURL string, body string) *http.Request
 	return req
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestStatusRequiresAuth(t *testing.T) {
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{"status": {ReturnCode: 0, Stdout: `{}`}}}, "http://127.0.0.1:9222")
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{"status": {ReturnCode: 0, Stdout: `{}`}}}, "http://127.0.0.1:9222")
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/jarvis-browser/status")
@@ -62,7 +74,7 @@ func TestStatusRequiresAuth(t *testing.T) {
 }
 
 func TestStatusReturnsCommandJSON(t *testing.T) {
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{"status": {ReturnCode: 0, Stdout: `{"running":true}`}}}, "http://127.0.0.1:9222")
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{"status": {ReturnCode: 0, Stdout: `{"running":true}`}}}, "http://127.0.0.1:9222")
 	defer ts.Close()
 
 	resp, err := http.DefaultClient.Do(authRequest(t, http.MethodGet, ts.URL+"/jarvis-browser/status", ""))
@@ -84,7 +96,7 @@ func TestStatusReturnsCommandJSON(t *testing.T) {
 }
 
 func TestStartSurfacesStderrOnFailure(t *testing.T) {
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{"start": {ReturnCode: 1, Stdout: `{"browser_running":false}`, Stderr: "boom"}}}, "http://127.0.0.1:9222")
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{"start": {ReturnCode: 1, Stdout: `{"browser_running":false}`, Stderr: "boom"}}}, "http://127.0.0.1:9222")
 	defer ts.Close()
 
 	resp, err := http.DefaultClient.Do(authRequest(t, http.MethodPost, ts.URL+"/jarvis-browser/start", ""))
@@ -114,7 +126,7 @@ func TestJSONVersionRewritesWebsocketDebuggerURL(t *testing.T) {
 	}))
 	defer chrome.Close()
 
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{}}, chrome.URL)
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{}}, chrome.URL)
 	defer ts.Close()
 
 	resp, err := http.DefaultClient.Do(authRequest(t, http.MethodGet, ts.URL+"/jarvis-browser/json/version", ""))
@@ -142,7 +154,7 @@ func TestJSONListRewritesNestedItems(t *testing.T) {
 	}))
 	defer chrome.Close()
 
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{}}, chrome.URL)
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{}}, chrome.URL)
 	defer ts.Close()
 
 	resp, err := http.DefaultClient.Do(authRequest(t, http.MethodGet, ts.URL+"/jarvis-browser/json/list", ""))
@@ -158,6 +170,44 @@ func TestJSONListRewritesNestedItems(t *testing.T) {
 	expected := strings.Replace(ts.URL, "http://", "ws://", 1) + "/jarvis-browser/devtools/devtools/page/page-1"
 	if payload[0]["webSocketDebuggerUrl"] != expected {
 		t.Fatalf("expected %s, got %#v", expected, payload[0]["webSocketDebuggerUrl"])
+	}
+}
+
+func TestJSONProxyAutoRestartsOnRecoverableCDPFailure(t *testing.T) {
+	manager := &fakeManager{results: map[string]CommandResult{"restart": {ReturnCode: 0}}}
+	srv := NewServer(Config{Token: "secret-token", ChromeBaseURL: "http://chrome.test"}, manager)
+	attempts := 0
+	srv.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("Get \"http://chrome.test/json/version\": dial tcp 127.0.0.1:9222: connect: connection refused")
+		}
+		body := io.NopCloser(strings.NewReader(`{"Browser":"Chromium/123","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc123"}`))
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+
+	rec := httptest.NewRecorder()
+	req := authRequest(t, http.MethodGet, "http://example.test/jarvis-browser/json/version", "")
+	req.Host = "example.test"
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if manager.restartCalls != 1 {
+		t.Fatalf("expected 1 restart, got %d", manager.restartCalls)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	expected := "ws://example.test/jarvis-browser/devtools/devtools/browser/abc123"
+	if payload["webSocketDebuggerUrl"] != expected {
+		t.Fatalf("expected %s, got %#v", expected, payload["webSocketDebuggerUrl"])
 	}
 }
 
@@ -180,7 +230,7 @@ func TestWebsocketProxy(t *testing.T) {
 	defer chrome.Close()
 
 	chromeWS := "http://" + strings.TrimPrefix(chrome.URL, "http://")
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{}}, chromeWS)
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{}}, chromeWS)
 	defer ts.Close()
 
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/jarvis-browser/devtools/devtools/page/test?token=secret-token"
@@ -210,7 +260,7 @@ func TestRewriteUsesForwardedProtoForWSS(t *testing.T) {
 	}))
 	defer chrome.Close()
 
-	srv := NewServer(Config{Token: "secret-token", ChromeBaseURL: chrome.URL}, fakeManager{results: map[string]CommandResult{}})
+	srv := NewServer(Config{Token: "secret-token", ChromeBaseURL: chrome.URL}, &fakeManager{results: map[string]CommandResult{}})
 	rec := httptest.NewRecorder()
 	req := authRequest(t, http.MethodGet, "http://example.test/jarvis-browser/json/version", "")
 	req.Host = "example.test"
@@ -231,7 +281,7 @@ func TestRewriteUsesForwardedProtoForWSS(t *testing.T) {
 }
 
 func TestUnauthorizedWebsocketRejected(t *testing.T) {
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{}}, "http://127.0.0.1:9222")
+	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{}}, "http://127.0.0.1:9222")
 	defer ts.Close()
 
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/jarvis-browser/devtools/devtools/page/test"
