@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", getenvDefault("JARVIS_BROWSER_PROXY_ADDR", "127.0.0.1:8787"), "listen address")
+	addr := flag.String("addr", getenvDefault("JARVIS_BROWSER_PROXY_ADDR", "0.0.0.0:8787"), "listen address")
 	token := flag.String("token", getenvDefault("JARVIS_BROWSER_PROXY_TOKEN", ""), "shared API token")
 	chromeBaseURL := flag.String("chrome-base-url", getenvDefault("JARVIS_CHROME_BASE_URL", "http://127.0.0.1:9222"), "upstream chrome devtools base URL")
 	browserBinary := flag.String("browser-binary", getenvDefault("JARVIS_CHROME_BROWSER", ""), "browser binary to launch")

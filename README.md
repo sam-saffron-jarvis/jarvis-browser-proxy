@@ -47,6 +47,8 @@ systemctl --user status jarvis-browser-proxy --no-pager
 
 At that point the proxy is running, but the browser is **not** started until someone calls the API.
 
+By default the proxy listens on `0.0.0.0:8787` so Jarvis can reach it from outside the host. Keep auth enabled and put it behind your existing host service if you want a tighter exposure surface.
+
 ## API
 
 All browser lifecycle is handled by the proxy itself.
@@ -85,7 +87,7 @@ sed -n 's/^JARVIS_BROWSER_PROXY_TOKEN=//p' ~/.config/jarvis-browser-proxy.env
 
 Common settings in that file:
 
-- `JARVIS_BROWSER_PROXY_ADDR=127.0.0.1:8787`
+- `JARVIS_BROWSER_PROXY_ADDR=0.0.0.0:8787`
 - `JARVIS_CHROME_PROFILE=~/.local/share/jarvis-chrome`
 - `JARVIS_CHROME_DOWNLOADS=~/.local/share/jarvis-chrome/downloads`
 - `JARVIS_CHROME_STATE_DIR=~/.local/state/jarvis-browser-proxy`
