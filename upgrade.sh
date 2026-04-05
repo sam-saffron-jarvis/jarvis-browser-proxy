@@ -45,6 +45,7 @@ require_cmd() {
 require_cmd git
 require_cmd systemctl
 require_cmd bash
+require_cmd curl
 
 cd "$SRC_DIR"
 
@@ -74,7 +75,21 @@ if [[ -f "$PROXY_ENV_FILE" ]]; then
   esac
   if [[ -n "$token" ]]; then
     echo
-    echo "Smoke check:"
-    curl -fsS -H "Authorization: Bearer $token" "http://$host:$port/jarvis-browser/status" || true
+    echo "Smoke check: waiting for proxy readiness on http://$host:$port ..."
+    ready=0
+    for _ in $(seq 1 30); do
+      if curl -fsS -H "Authorization: Bearer $token" "http://$host:$port/jarvis-browser/status"; then
+        ready=1
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$ready" != "1" ]]; then
+      echo >&2
+      echo "Smoke check failed after waiting for readiness." >&2
+      echo "Recent logs:" >&2
+      journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true
+      exit 1
+    fi
   fi
 fi
