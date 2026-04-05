@@ -62,9 +62,19 @@ if [[ -f "$PROXY_ENV_FILE" ]]; then
   source "$PROXY_ENV_FILE"
   addr="${JARVIS_BROWSER_PROXY_ADDR:-127.0.0.1:8787}"
   token="${JARVIS_BROWSER_PROXY_TOKEN:-}"
+  host="${addr%:*}"
+  port="${addr##*:}"
+  if [[ "$host" == "$addr" ]]; then
+    port="8787"
+  fi
+  case "$host" in
+    0.0.0.0|::|'[::]'|'')
+      host="127.0.0.1"
+      ;;
+  esac
   if [[ -n "$token" ]]; then
     echo
     echo "Smoke check:"
-    curl -fsS -H "Authorization: Bearer $token" "http://$addr/jarvis-browser/status" || true
+    curl -fsS -H "Authorization: Bearer $token" "http://$host:$port/jarvis-browser/status" || true
   fi
 fi
