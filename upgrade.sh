@@ -77,8 +77,10 @@ if [[ -f "$PROXY_ENV_FILE" ]]; then
     echo
     echo "Smoke check: waiting for proxy readiness on http://$host:$port ..."
     ready=0
+    response_file="$(mktemp)"
+    trap 'rm -f "$response_file"' EXIT
     for _ in $(seq 1 30); do
-      if curl -fsS -H "Authorization: Bearer $token" "http://$host:$port/jarvis-browser/status"; then
+      if curl -fsS -H "Authorization: Bearer $token" "http://$host:$port/jarvis-browser/status" >"$response_file" 2>/dev/null; then
         ready=1
         break
       fi
@@ -91,5 +93,9 @@ if [[ -f "$PROXY_ENV_FILE" ]]; then
       journalctl --user -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true
       exit 1
     fi
+    echo "Smoke check: proxy ready"
+    cat "$response_file"
+    rm -f "$response_file"
+    trap - EXIT
   fi
 fi
