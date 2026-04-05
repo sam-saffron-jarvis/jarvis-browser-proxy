@@ -45,6 +45,12 @@ systemctl --user enable --now jarvis-browser-proxy
 systemctl --user status jarvis-browser-proxy --no-pager
 ```
 
+For later updates, use:
+
+```bash
+./upgrade.sh --pull
+```
+
 At that point the proxy is running, but the browser is **not** started until someone calls the API.
 
 By default the proxy listens on `0.0.0.0:8787` so Jarvis can reach it from outside the host. Keep auth enabled and put it behind your existing host service if you want a tighter exposure surface.
@@ -137,6 +143,7 @@ The move is best-effort and only runs when `hyprctl` is available.
 
 - `README.md` — this file
 - `install.sh` — builds the binary, creates config, installs the single user unit
+- `upgrade.sh` — pulls optionally, rebuilds, reinstalls, restarts the service, and smoke-checks it
 - `jarvis-browser-proxy.service` — systemd user unit for the Go proxy
 - `cmd/jarvis-browser-proxy/main.go` — CLI entrypoint
 - `proxy/server.go` — HTTP routes + browser lifecycle + CDP proxy
