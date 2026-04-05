@@ -7,6 +7,7 @@ What you get:
 - a dedicated `jarvis-chrome` browser profile
 - a normal Wayland window on your desktop
 - Chrome DevTools bound to `127.0.0.1:9222`
+- the browser lands on **Hyprland workspace 9 by default**
 - a tiny wrapper command: `jarvis-browser start|stop|status|restart`
 - a small Go proxy that can:
   - authenticate requests from Jarvis
@@ -55,6 +56,24 @@ Show it with:
 ```bash
 sed -n 's/^JARVIS_BROWSER_PROXY_TOKEN=//p' ~/.config/jarvis-browser-proxy.env
 ```
+
+### Workspace selection
+
+Default workspace is `9` so the window is easy to find.
+
+Override it with:
+
+```bash
+export JARVIS_CHROME_WORKSPACE=4
+```
+
+Or disable workspace moves entirely:
+
+```bash
+export JARVIS_CHROME_WORKSPACE=
+```
+
+The move is best-effort and only runs when `hyprctl` is available.
 
 ## Installed files
 
