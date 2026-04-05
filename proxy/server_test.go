@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -22,8 +25,13 @@ func newTestServer(t *testing.T, manager ProcessManager, chromeBase string) *htt
 	t.Helper()
 	srv := NewServer(Config{
 		Token:         "secret-token",
-		BrowserCmd:    "jarvis-browser",
 		ChromeBaseURL: chromeBase,
+		DebugHost:     "127.0.0.1",
+		DebugPort:     9222,
+		Homepage:      "about:blank",
+		Workspace:     "9",
+		StartupWait:   time.Second,
+		StopWait:      time.Second,
 	}, manager)
 	return httptest.NewServer(srv.Routes())
 }
@@ -76,7 +84,7 @@ func TestStatusReturnsCommandJSON(t *testing.T) {
 }
 
 func TestStartSurfacesStderrOnFailure(t *testing.T) {
-	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{"start": {ReturnCode: 1, Stdout: `{"service_active":false}`, Stderr: "boom"}}}, "http://127.0.0.1:9222")
+	ts := newTestServer(t, fakeManager{results: map[string]CommandResult{"start": {ReturnCode: 1, Stdout: `{"browser_running":false}`, Stderr: "boom"}}}, "http://127.0.0.1:9222")
 	defer ts.Close()
 
 	resp, err := http.DefaultClient.Do(authRequest(t, http.MethodPost, ts.URL+"/jarvis-browser/start", ""))
@@ -233,5 +241,65 @@ func TestUnauthorizedWebsocketRejected(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 response, got %#v", resp)
+	}
+}
+
+func TestBrowserManagerStartStop(t *testing.T) {
+	tmp := t.TempDir()
+	browserPath := filepath.Join(tmp, "fake-browser")
+	script := `#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+sleep 30
+`
+	if err := os.WriteFile(browserPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &BrowserManager{
+		cfg: Config{
+			ChromeBaseURL: "http://127.0.0.1:65534",
+			BrowserBinary: browserPath,
+			ProfileDir:    filepath.Join(tmp, "profile"),
+			DownloadsDir:  filepath.Join(tmp, "downloads"),
+			StateDir:      filepath.Join(tmp, "state"),
+			DebugHost:     "127.0.0.1",
+			DebugPort:     9222,
+			Homepage:      "about:blank",
+			Workspace:     "",
+			StartupWait:   0,
+			StopWait:      2 * time.Second,
+		},
+		client: &http.Client{Timeout: 100 * time.Millisecond},
+	}
+
+	start := manager.Run("start")
+	if start.ReturnCode != 0 {
+		t.Fatalf("start failed: %+v", start)
+	}
+
+	var started map[string]any
+	if err := json.Unmarshal([]byte(start.Stdout), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started["browser_running"] != true {
+		t.Fatalf("expected browser_running=true, got %#v", started)
+	}
+
+	status := manager.Run("status")
+	if status.ReturnCode != 0 {
+		t.Fatalf("status failed: %+v", status)
+	}
+
+	stop := manager.Run("stop")
+	if stop.ReturnCode != 0 {
+		t.Fatalf("stop failed: %+v", stop)
+	}
+
+	var stopped map[string]any
+	if err := json.Unmarshal([]byte(stop.Stdout), &stopped); err != nil {
+		t.Fatal(err)
+	}
+	if stopped["browser_running"] != false {
+		t.Fatalf("expected browser_running=false, got %#v", stopped)
 	}
 }
