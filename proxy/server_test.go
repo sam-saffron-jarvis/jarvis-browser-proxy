@@ -95,6 +95,38 @@ func TestStatusReturnsCommandJSON(t *testing.T) {
 	}
 }
 
+func TestBrowserManagerStatusDoesNotBlockOnOperationLock(t *testing.T) {
+	tempDir := t.TempDir()
+	manager := &BrowserManager{
+		cfg: Config{
+			ChromeBaseURL: "http://127.0.0.1:65534",
+			StateDir:      tempDir,
+			Workspace:     "9",
+		},
+		client: &http.Client{Timeout: 50 * time.Millisecond},
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "browser.pid"), []byte("999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.opMu.Lock()
+	defer manager.opMu.Unlock()
+
+	done := make(chan CommandResult, 1)
+	go func() {
+		done <- manager.statusResult(0, "")
+	}()
+
+	select {
+	case result := <-done:
+		if result.ReturnCode != 0 {
+			t.Fatalf("expected success, got %#v", result)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("statusResult blocked on operation lock")
+	}
+}
+
 func TestStartSurfacesStderrOnFailure(t *testing.T) {
 	ts := newTestServer(t, &fakeManager{results: map[string]CommandResult{"start": {ReturnCode: 1, Stdout: `{"browser_running":false}`, Stderr: "boom"}}}, "http://127.0.0.1:9222")
 	defer ts.Close()

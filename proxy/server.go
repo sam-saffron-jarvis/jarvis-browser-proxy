@@ -46,9 +46,12 @@ type ProcessManager interface {
 }
 
 type BrowserManager struct {
-	cfg               Config
-	client            *http.Client
-	mu                sync.Mutex
+	cfg    Config
+	client *http.Client
+
+	opMu sync.Mutex
+
+	metaMu            sync.RWMutex
 	lastRestartAt     time.Time
 	restartCount      int
 	lastRestartReason string
@@ -239,8 +242,8 @@ func (m *BrowserManager) Run(action string) CommandResult {
 }
 
 func (m *BrowserManager) start() CommandResult {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	return m.startLocked()
 }
 
@@ -302,8 +305,8 @@ func (m *BrowserManager) startLocked() CommandResult {
 }
 
 func (m *BrowserManager) stop() CommandResult {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 
 	return m.stopLocked()
 }
@@ -347,8 +350,8 @@ func (m *BrowserManager) stopLocked() CommandResult {
 }
 
 func (m *BrowserManager) restart(reason string) CommandResult {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	return m.restartLocked(reason)
 }
 
@@ -357,15 +360,11 @@ func (m *BrowserManager) restartLocked(reason string) CommandResult {
 	if stopResult.ReturnCode != 0 {
 		return stopResult
 	}
-	m.lastRestartAt = time.Now().UTC()
-	m.restartCount++
-	m.lastRestartReason = reason
+	m.setRestartMetadata(time.Now().UTC(), reason)
 	return m.startLocked()
 }
 
 func (m *BrowserManager) statusResult(code int, stderr string) CommandResult {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	return m.statusResultLocked(code, stderr)
 }
 
@@ -377,14 +376,17 @@ func (m *BrowserManager) statusResultLocked(code int, stderr string) CommandResu
 		"healthy":         false,
 		"debug_url":       strings.TrimRight(m.cfg.ChromeBaseURL, "/") + "/json/version",
 		"workspace":       m.cfg.Workspace,
-		"restart_count":   m.restartCount,
 	}
-	if !m.lastRestartAt.IsZero() {
-		payload["last_restart_at"] = m.lastRestartAt.Format(time.RFC3339)
+
+	lastRestartAt, restartCount, lastRestartReason := m.restartMetadata()
+	payload["restart_count"] = restartCount
+	if !lastRestartAt.IsZero() {
+		payload["last_restart_at"] = lastRestartAt.Format(time.RFC3339)
 	}
-	if m.lastRestartReason != "" {
-		payload["last_restart_reason"] = m.lastRestartReason
+	if lastRestartReason != "" {
+		payload["last_restart_reason"] = lastRestartReason
 	}
+
 	if pid, err := m.readPID(); err == nil && pid > 0 && processAlive(pid) {
 		payload["browser_running"] = true
 		payload["browser_pid"] = pid
@@ -398,6 +400,20 @@ func (m *BrowserManager) statusResultLocked(code int, stderr string) CommandResu
 
 func (m *BrowserManager) mustStatusJSON() string {
 	return m.statusResult(0, "").Stdout
+}
+
+func (m *BrowserManager) setRestartMetadata(at time.Time, reason string) {
+	m.metaMu.Lock()
+	defer m.metaMu.Unlock()
+	m.lastRestartAt = at
+	m.restartCount++
+	m.lastRestartReason = reason
+}
+
+func (m *BrowserManager) restartMetadata() (time.Time, int, string) {
+	m.metaMu.RLock()
+	defer m.metaMu.RUnlock()
+	return m.lastRestartAt, m.restartCount, m.lastRestartReason
 }
 
 func (m *BrowserManager) ensureDirs() error {
@@ -478,14 +494,20 @@ func (m *BrowserManager) watchdog(interval time.Duration) {
 }
 
 func (m *BrowserManager) ensureHealthy(reason string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	running, _ := m.browserRunningLocked()
 	if !running || m.cdpReady() {
 		return false
 	}
-	if m.cfg.RestartCooldown > 0 && !m.lastRestartAt.IsZero() && time.Since(m.lastRestartAt) < m.cfg.RestartCooldown {
+
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	running, _ = m.browserRunningLocked()
+	if !running || m.cdpReady() {
+		return false
+	}
+	lastRestartAt, _, _ := m.restartMetadata()
+	if m.cfg.RestartCooldown > 0 && !lastRestartAt.IsZero() && time.Since(lastRestartAt) < m.cfg.RestartCooldown {
 		return false
 	}
 
