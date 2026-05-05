@@ -266,11 +266,12 @@ func (m *BrowserManager) startLocked() CommandResult {
 	}
 
 	cmd := exec.Command(browser, m.browserArgs()...)
-	nullFile, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	logFile, err := m.openBrowserLog()
 	if err == nil {
-		defer nullFile.Close()
-		cmd.Stdout = nullFile
-		cmd.Stderr = nullFile
+		defer logFile.Close()
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -282,8 +283,9 @@ func (m *BrowserManager) startLocked() CommandResult {
 		return CommandResult{ReturnCode: 1, Stderr: err.Error()}
 	}
 
+	waitCh := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
+		waitCh <- cmd.Wait()
 		m.removePIDIfMatches(pid)
 	}()
 	go m.moveToWorkspace()
@@ -292,13 +294,37 @@ func (m *BrowserManager) startLocked() CommandResult {
 		deadline := time.Now().Add(m.cfg.StartupWait)
 		for time.Now().Before(deadline) {
 			if m.cdpReady() {
-				break
+				return m.statusResultLocked(0, "")
 			}
-			if !processAlive(pid) {
-				return CommandResult{ReturnCode: 1, Stderr: "browser exited before DevTools became ready", Stdout: m.mustStatusJSON()}
+			select {
+			case err := <-waitCh:
+				m.removePIDIfMatches(pid)
+				stderr := "browser exited before DevTools became ready"
+				if err != nil {
+					stderr += ": " + err.Error()
+				}
+				if tail := m.browserLogTail(); tail != "" {
+					stderr += "\n\nLast browser output:\n" + tail
+				}
+				return CommandResult{ReturnCode: 1, Stderr: stderr, Stdout: m.mustStatusJSON()}
+			default:
+			}
+			if !m.managedProcessAlive(pid) {
+				stderr := "browser exited before DevTools became ready"
+				if tail := m.browserLogTail(); tail != "" {
+					stderr += "\n\nLast browser output:\n" + tail
+				}
+				return CommandResult{ReturnCode: 1, Stderr: stderr, Stdout: m.mustStatusJSON()}
 			}
 			time.Sleep(250 * time.Millisecond)
 		}
+		stderr := "timed out waiting for DevTools to become ready"
+		if tail := m.browserLogTail(); tail != "" {
+			stderr += "\n\nLast browser output:\n" + tail
+		}
+		_ = signalProcessGroup(pid, syscall.SIGKILL)
+		m.removePIDIfMatches(pid)
+		return CommandResult{ReturnCode: 1, Stderr: stderr, Stdout: m.mustStatusJSON()}
 	}
 
 	return m.statusResultLocked(0, "")
@@ -313,34 +339,30 @@ func (m *BrowserManager) stop() CommandResult {
 
 func (m *BrowserManager) stopLocked() CommandResult {
 	pid, err := m.readPID()
-	if err != nil || pid <= 0 || !processAlive(pid) {
+	if err != nil || pid <= 0 || !m.managedProcessAlive(pid) {
 		m.removePIDIfMatches(pid)
 		return m.statusResultLocked(0, "")
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return CommandResult{ReturnCode: 1, Stderr: err.Error()}
-	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil && !strings.Contains(err.Error(), "finished") {
+	if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil && !strings.Contains(err.Error(), "finished") {
 		return CommandResult{ReturnCode: 1, Stderr: err.Error()}
 	}
 
 	deadline := time.Now().Add(m.cfg.StopWait)
 	for time.Now().Before(deadline) {
-		if !processAlive(pid) {
+		if !m.managedProcessAlive(pid) {
 			m.removePIDIfMatches(pid)
 			return m.statusResultLocked(0, "")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !strings.Contains(err.Error(), "finished") {
+	if err := signalProcessGroup(pid, syscall.SIGKILL); err != nil && !strings.Contains(err.Error(), "finished") {
 		return CommandResult{ReturnCode: 1, Stderr: err.Error()}
 	}
 
 	for i := 0; i < 20; i++ {
-		if !processAlive(pid) {
+		if !m.managedProcessAlive(pid) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -387,7 +409,7 @@ func (m *BrowserManager) statusResultLocked(code int, stderr string) CommandResu
 		payload["last_restart_reason"] = lastRestartReason
 	}
 
-	if pid, err := m.readPID(); err == nil && pid > 0 && processAlive(pid) {
+	if pid, err := m.readPID(); err == nil && pid > 0 && m.managedProcessAlive(pid) {
 		payload["browser_running"] = true
 		payload["browser_pid"] = pid
 		payload["healthy"] = cdpReady
@@ -426,6 +448,32 @@ func (m *BrowserManager) ensureDirs() error {
 		}
 	}
 	return nil
+}
+
+func (m *BrowserManager) browserLogPath() string {
+	return filepath.Join(m.cfg.StateDir, "browser.log")
+}
+
+func (m *BrowserManager) openBrowserLog() (*os.File, error) {
+	if err := os.MkdirAll(m.cfg.StateDir, 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(m.browserLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+}
+
+func (m *BrowserManager) browserLogTail() string {
+	data, err := os.ReadFile(m.browserLogPath())
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	const maxTail = 4096
+	if len(data) > maxTail {
+		data = data[len(data)-maxTail:]
+		if idx := strings.IndexByte(string(data), '\n'); idx >= 0 && idx+1 < len(data) {
+			data = data[idx+1:]
+		}
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func (m *BrowserManager) findBrowser() (string, error) {
@@ -546,11 +594,49 @@ func (m *BrowserManager) browserRunningLocked() (bool, int) {
 	if err != nil || pid <= 0 {
 		return false, 0
 	}
-	if !processAlive(pid) {
+	if !m.managedProcessAlive(pid) {
 		_ = os.Remove(m.pidFile())
 		return false, 0
 	}
 	return true, pid
+}
+
+func (m *BrowserManager) managedProcessAlive(pid int) bool {
+	if !processAlive(pid) || processZombie(pid) {
+		return false
+	}
+	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	args := strings.ReplaceAll(string(cmdline), "\x00", " ")
+	return strings.Contains(args, "--remote-debugging-port="+strconv.Itoa(m.cfg.DebugPort)) &&
+		strings.Contains(args, "--user-data-dir="+m.cfg.ProfileDir)
+}
+
+func processZombie(pid int) bool {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(stat))
+	return len(fields) >= 3 && fields[2] == "Z"
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if pid <= 0 {
+		return fmt.Errorf("invalid pid %d", pid)
+	}
+	// Browser processes are started in their own process group, so this mirrors
+	// systemd's useful behavior: kill the whole Chrome tree, not just the root.
+	if err := syscall.Kill(-pid, signal); err == nil {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(signal)
 }
 
 func processAlive(pid int) bool {

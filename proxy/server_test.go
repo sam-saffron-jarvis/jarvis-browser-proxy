@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,32 +329,10 @@ func TestUnauthorizedWebsocketRejected(t *testing.T) {
 }
 
 func TestBrowserManagerStartStop(t *testing.T) {
-	tmp := t.TempDir()
-	browserPath := filepath.Join(tmp, "fake-browser")
-	script := `#!/usr/bin/env bash
+	manager := newFakeBrowserManager(t, `#!/usr/bin/env bash
 trap 'exit 0' TERM INT
 sleep 30
-`
-	if err := os.WriteFile(browserPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	manager := &BrowserManager{
-		cfg: Config{
-			ChromeBaseURL: "http://127.0.0.1:65534",
-			BrowserBinary: browserPath,
-			ProfileDir:    filepath.Join(tmp, "profile"),
-			DownloadsDir:  filepath.Join(tmp, "downloads"),
-			StateDir:      filepath.Join(tmp, "state"),
-			DebugHost:     "127.0.0.1",
-			DebugPort:     9222,
-			Homepage:      "about:blank",
-			Workspace:     "",
-			StartupWait:   0,
-			StopWait:      2 * time.Second,
-		},
-		client: &http.Client{Timeout: 100 * time.Millisecond},
-	}
+`, 0)
 
 	start := manager.Run("start")
 	if start.ReturnCode != 0 {
@@ -383,5 +363,83 @@ sleep 30
 	}
 	if stopped["browser_running"] != false {
 		t.Fatalf("expected browser_running=false, got %#v", stopped)
+	}
+}
+
+func TestBrowserManagerIgnoresStalePIDForUnrelatedProcess(t *testing.T) {
+	manager := newFakeBrowserManager(t, `#!/usr/bin/env bash
+sleep 30
+`, 0)
+
+	unrelated := exec.Command("sleep", "30")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer unrelated.Wait()
+	defer unrelated.Process.Kill()
+
+	if err := os.MkdirAll(manager.cfg.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.pidFile(), []byte(strconv.Itoa(unrelated.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	status := manager.Run("status")
+	if status.ReturnCode != 0 {
+		t.Fatalf("status failed: %+v", status)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(status.Stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["browser_running"] != false {
+		t.Fatalf("expected stale unrelated pid to be ignored, got %#v", payload)
+	}
+}
+
+func TestBrowserManagerStartFailsWhenCDPNeverReady(t *testing.T) {
+	manager := newFakeBrowserManager(t, `#!/usr/bin/env bash
+echo "fake browser started"
+sleep 30
+`, 250*time.Millisecond)
+
+	start := manager.Run("start")
+	defer manager.Run("stop")
+
+	if start.ReturnCode == 0 {
+		t.Fatalf("expected start failure while CDP is unavailable, got %+v", start)
+	}
+	if !strings.Contains(start.Stderr, "timed out waiting for DevTools") {
+		t.Fatalf("expected timeout in stderr, got %q", start.Stderr)
+	}
+	if !strings.Contains(start.Stderr, "fake browser started") {
+		t.Fatalf("expected browser log tail in stderr, got %q", start.Stderr)
+	}
+}
+
+func newFakeBrowserManager(t *testing.T, script string, startupWait time.Duration) *BrowserManager {
+	t.Helper()
+	tmp := t.TempDir()
+	browserPath := filepath.Join(tmp, "fake-browser")
+	if err := os.WriteFile(browserPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &BrowserManager{
+		cfg: Config{
+			ChromeBaseURL: "http://127.0.0.1:65534",
+			BrowserBinary: browserPath,
+			ProfileDir:    filepath.Join(tmp, "profile"),
+			DownloadsDir:  filepath.Join(tmp, "downloads"),
+			StateDir:      filepath.Join(tmp, "state"),
+			DebugHost:     "127.0.0.1",
+			DebugPort:     9222,
+			Homepage:      "about:blank",
+			Workspace:     "",
+			StartupWait:   startupWait,
+			StopWait:      2 * time.Second,
+		},
+		client: &http.Client{Timeout: 50 * time.Millisecond},
 	}
 }
