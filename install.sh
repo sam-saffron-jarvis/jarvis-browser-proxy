@@ -24,6 +24,38 @@ HYPRLAND_CONFIG="${HYPRLAND_CONFIG:-$HOME/.config/hypr/hyprland.conf}"
 HYPRLAND_BEGIN="# >>> jarvis-browser-proxy systemd env >>>"
 HYPRLAND_END="# <<< jarvis-browser-proxy systemd env <<<"
 SERVICE_NAME="jarvis-browser-proxy.service"
+NON_INTERACTIVE=0
+CONFIGURE_HYPRLAND=0
+
+usage() {
+  cat <<EOF
+usage: ./install.sh [--non-interactive] [--configure-hyprland]
+
+Options:
+  --non-interactive    Never prompt for input or enable the service
+  --configure-hyprland Add or refresh the managed Hyprland environment block
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --non-interactive)
+      NON_INTERACTIVE=1
+      ;;
+    --configure-hyprland)
+      CONFIGURE_HYPRLAND=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 log() {
   printf '%s\n' "$*"
@@ -112,8 +144,14 @@ maybe_configure_hyprland() {
     return 0
   fi
 
-  if ! [[ -t 0 ]]; then
-    log "Hyprland config not amended automatically because install.sh is not running interactively."
+  if [[ "$CONFIGURE_HYPRLAND" == "1" ]]; then
+    append_hyprland_block
+    log "Updated $HYPRLAND_CONFIG"
+    return 0
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "1" || ! -t 0 ]]; then
+    log "Hyprland config not amended automatically."
     log "Add this block to $HYPRLAND_CONFIG:"
     write_hyprland_block
     return 0
@@ -149,7 +187,7 @@ import_session_environment_now() {
 }
 
 maybe_enable_and_start_service() {
-  if ! [[ -t 0 ]]; then
+  if [[ "$NON_INTERACTIVE" == "1" || ! -t 0 ]]; then
     return 0
   fi
 
@@ -219,5 +257,5 @@ Show the token:
   sed -n 's/^JARVIS_BROWSER_PROXY_TOKEN=//p' $PROXY_ENV_FILE
 
 Browser start/stop/status happens via the HTTP API on the proxy.
-If you said yes to the Hyprland change, future logins will keep the GUI env wiring in place.
+If the managed Hyprland block was installed, future logins will keep the GUI environment wiring in place.
 EOF

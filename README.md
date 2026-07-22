@@ -55,6 +55,8 @@ For later updates, use:
 ./upgrade.sh --pull
 ```
 
+The upgrade path is non-interactive: it refreshes the managed Hyprland block automatically, leaves service enablement unchanged, and restarts the installed service after rebuilding.
+
 At that point the proxy is running, but the browser is **not** started until someone calls the API.
 
 By default the proxy listens on `0.0.0.0:8787` so Jarvis can reach it from outside the host. Keep auth enabled and put it behind your existing host service if you want a tighter exposure surface.
