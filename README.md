@@ -26,7 +26,7 @@ From this directory:
 bash install.sh
 ```
 
-Then, once in your logged-in desktop session:
+Then, once in your logged-in desktop session, import the graphical environment and restart the proxy so its future Chromium children inherit that environment:
 
 ```bash
 systemctl --user import-environment \
@@ -36,7 +36,11 @@ systemctl --user import-environment \
 dbus-update-activation-environment --systemd \
   WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY \
   DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
+
+systemctl --user restart jarvis-browser-proxy
 ```
+
+The installer can add an equivalent `exec-once` block to Hyprland. It performs the import and restart sequentially on every desktop login. The restart matters: importing variables updates the systemd user manager, but cannot retrofit them into an already-running proxy process.
 
 Then enable the single service:
 

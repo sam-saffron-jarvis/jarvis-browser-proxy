@@ -68,36 +68,56 @@ hyprland_block_present() {
   [[ -f "$HYPRLAND_CONFIG" ]] && grep -Fq "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG"
 }
 
-append_hyprland_block() {
-  mkdir -p "$(dirname "$HYPRLAND_CONFIG")"
-  touch "$HYPRLAND_CONFIG"
-  cat >> "$HYPRLAND_CONFIG" <<EOF
-
+write_hyprland_block() {
+  cat <<EOF
 $HYPRLAND_BEGIN
-exec-once = systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
-exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
+exec-once = sh -lc 'systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; if command -v dbus-update-activation-environment >/dev/null 2>&1; then dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; fi; systemctl --user restart $SERVICE_NAME'
 $HYPRLAND_END
 EOF
 }
 
+append_hyprland_block() {
+  mkdir -p "$(dirname "$HYPRLAND_CONFIG")"
+  touch "$HYPRLAND_CONFIG"
+  printf '\n' >> "$HYPRLAND_CONFIG"
+  write_hyprland_block >> "$HYPRLAND_CONFIG"
+}
+
+refresh_hyprland_block() {
+  local begin_line end_line tmp
+  begin_line="$(grep -nF "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
+  end_line="$(grep -nF "$HYPRLAND_END" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
+
+  if [[ -z "$begin_line" || -z "$end_line" || "$end_line" -lt "$begin_line" ]]; then
+    echo "Invalid managed Hyprland block in $HYPRLAND_CONFIG" >&2
+    return 1
+  fi
+
+  tmp="$(mktemp)"
+  {
+    if (( begin_line > 1 )); then
+      head -n $((begin_line - 1)) "$HYPRLAND_CONFIG"
+    fi
+    write_hyprland_block
+    tail -n +$((end_line + 1)) "$HYPRLAND_CONFIG"
+  } > "$tmp"
+  cat "$tmp" > "$HYPRLAND_CONFIG"
+  rm -f "$tmp"
+}
+
 maybe_configure_hyprland() {
   if hyprland_block_present; then
-    log "Hyprland systemd environment import block already present in $HYPRLAND_CONFIG"
+    refresh_hyprland_block
+    log "Refreshed Hyprland systemd environment block in $HYPRLAND_CONFIG"
     return 0
   fi
 
-  if [[ ! -t 0 ]]; then
+  if ! [[ -t 0 ]]; then
     log "Hyprland config not amended automatically because install.sh is not running interactively."
     log "Add this block to $HYPRLAND_CONFIG:"
-    cat <<EOF
-$HYPRLAND_BEGIN
-exec-once = systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
-exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
-$HYPRLAND_END
-EOF
+    write_hyprland_block
     return 0
   fi
-
   if prompt_yes_no "Amend $HYPRLAND_CONFIG with Hyprland exec-once lines for systemd user env import?"; then
     append_hyprland_block
     log "Updated $HYPRLAND_CONFIG"
