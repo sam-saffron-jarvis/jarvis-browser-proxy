@@ -53,7 +53,7 @@ if [[ "$DO_PULL" == "1" ]]; then
   git pull --ff-only
 fi
 
-bash "$SRC_DIR/install.sh"
+bash "$SRC_DIR/install.sh" --non-interactive --configure-hyprland
 systemctl --user daemon-reload
 systemctl --user restart "$SERVICE_NAME"
 systemctl --user --no-pager --full status "$SERVICE_NAME" || true
