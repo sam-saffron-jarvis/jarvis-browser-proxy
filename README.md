@@ -40,7 +40,7 @@ dbus-update-activation-environment --systemd \
 systemctl --user restart jarvis-browser-proxy
 ```
 
-The installer can add an equivalent `exec-once` block to Hyprland. It performs the import and restart sequentially on every desktop login. The restart matters: importing variables updates the systemd user manager, but cannot retrofit them into an already-running proxy process.
+The installer adds an equivalent startup hook to the active Hyprland config. It detects `~/.config/hypr/hyprland.lua` and installs a `hl.on("hyprland.start", ...)` hook; older installations without Lua continue to receive an `exec-once` block in `hyprland.conf`. The hook performs the import and restart sequentially on every desktop login. The restart matters: importing variables updates the systemd user manager, but cannot retrofit them into an already-running proxy process.
 
 Then enable the single service:
 
