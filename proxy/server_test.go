@@ -366,6 +366,73 @@ sleep 30
 	}
 }
 
+func TestBrowserManagerAdoptsMatchingProcessWithoutPIDFile(t *testing.T) {
+	manager := newFakeBrowserManager(t, `#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+`, 0)
+
+	cmd := exec.Command(manager.cfg.BrowserBinary, manager.browserArgs()...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Wait()
+	defer cmd.Process.Kill()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.managedProcessAlive(cmd.Process.Pid) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	status := manager.Run("status")
+	if status.ReturnCode != 0 {
+		t.Fatalf("status failed: %+v", status)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(status.Stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["browser_running"] != true {
+		t.Fatalf("expected matching process to be adopted, got %#v", payload)
+	}
+	if got := int(payload["browser_pid"].(float64)); got != cmd.Process.Pid {
+		t.Fatalf("expected adopted pid %d, got %d", cmd.Process.Pid, got)
+	}
+	persisted, err := manager.readPID()
+	if err != nil || persisted != cmd.Process.Pid {
+		t.Fatalf("expected adopted pid file %d, got %d (%v)", cmd.Process.Pid, persisted, err)
+	}
+}
+
+func TestBrowserManagerTreatsReadyCDPAsRunningWithoutManagedPID(t *testing.T) {
+	chrome := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"Browser":"Chromium/test"}`))
+	}))
+	defer chrome.Close()
+
+	manager := newFakeBrowserManager(t, "#!/usr/bin/env bash\nexit 99\n", 0)
+	manager.cfg.ChromeBaseURL = chrome.URL
+	manager.client = chrome.Client()
+
+	status := manager.Run("status")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(status.Stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["browser_running"] != true || payload["healthy"] != true || payload["browser_managed"] != false {
+		t.Fatalf("expected ready unmanaged CDP to be reported as healthy, got %#v", payload)
+	}
+
+	start := manager.Run("start")
+	if start.ReturnCode != 0 {
+		t.Fatalf("start should accept already-ready CDP: %+v", start)
+	}
+}
+
 func TestBrowserManagerIgnoresStalePIDForUnrelatedProcess(t *testing.T) {
 	manager := newFakeBrowserManager(t, `#!/usr/bin/env bash
 sleep 30

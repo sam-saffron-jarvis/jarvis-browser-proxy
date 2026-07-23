@@ -255,6 +255,11 @@ func (m *BrowserManager) startLocked() CommandResult {
 		}
 		return m.restartLocked("start requested while CDP unhealthy")
 	}
+	if m.cdpReady() {
+		// Never launch a second browser onto a live debugging port merely because
+		// Chrome's original launcher exited before we could persist/adopt its PID.
+		return m.statusResultLocked(0, "")
+	}
 
 	if err := m.ensureDirs(); err != nil {
 		return CommandResult{ReturnCode: 1, Stderr: err.Error()}
@@ -338,9 +343,11 @@ func (m *BrowserManager) stop() CommandResult {
 }
 
 func (m *BrowserManager) stopLocked() CommandResult {
-	pid, err := m.readPID()
-	if err != nil || pid <= 0 || !m.managedProcessAlive(pid) {
-		m.removePIDIfMatches(pid)
+	running, pid := m.browserRunningLocked()
+	if !running {
+		if m.cdpReady() {
+			return m.statusResultLocked(1, "browser CDP is ready, but no managed browser process could be identified")
+		}
 		return m.statusResultLocked(0, "")
 	}
 
@@ -409,12 +416,17 @@ func (m *BrowserManager) statusResultLocked(code int, stderr string) CommandResu
 		payload["last_restart_reason"] = lastRestartReason
 	}
 
-	if pid, err := m.readPID(); err == nil && pid > 0 && m.managedProcessAlive(pid) {
+	if running, pid := m.browserRunningLocked(); running {
 		payload["browser_running"] = true
 		payload["browser_pid"] = pid
 		payload["healthy"] = cdpReady
-	} else if pid > 0 {
-		m.removePIDIfMatches(pid)
+	} else if cdpReady {
+		// CDP is definitive evidence that a browser is alive. This fallback keeps
+		// status and start honest even if Chrome daemonized in an unexpected way
+		// and no matching root process could be adopted.
+		payload["browser_running"] = true
+		payload["browser_managed"] = false
+		payload["healthy"] = true
 	}
 	stdout, _ := json.Marshal(payload)
 	return CommandResult{ReturnCode: code, Stdout: string(stdout), Stderr: stderr}
@@ -591,14 +603,44 @@ func (m *BrowserManager) removePIDIfMatches(pid int) {
 
 func (m *BrowserManager) browserRunningLocked() (bool, int) {
 	pid, err := m.readPID()
-	if err != nil || pid <= 0 {
+	if err == nil && pid > 0 && m.managedProcessAlive(pid) {
+		return true, pid
+	}
+	if pid > 0 {
+		_ = os.Remove(m.pidFile())
+	}
+
+	pid = m.discoverManagedProcess()
+	if pid <= 0 {
 		return false, 0
 	}
-	if !m.managedProcessAlive(pid) {
-		_ = os.Remove(m.pidFile())
-		return false, 0
+	if err := os.MkdirAll(m.cfg.StateDir, 0o755); err == nil {
+		_ = os.WriteFile(m.pidFile(), []byte(strconv.Itoa(pid)), 0o600)
 	}
 	return true, pid
+}
+
+// discoverManagedProcess adopts Chrome after its launcher exits or the proxy is
+// restarted independently. Only the browser root carries both of these unique
+// flags; renderer and utility processes do not.
+func (m *BrowserManager) discoverManagedProcess() int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		if m.managedProcessAlive(pid) {
+			return pid
+		}
+	}
+	return 0
 }
 
 func (m *BrowserManager) managedProcessAlive(pid int) bool {
