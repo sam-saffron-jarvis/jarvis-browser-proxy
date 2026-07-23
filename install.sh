@@ -20,9 +20,10 @@ STOP_WAIT="${JARVIS_CHROME_STOP_WAIT:-10s}"
 HEALTH_CHECK_INTERVAL="${JARVIS_CHROME_HEALTH_CHECK_INTERVAL:-30s}"
 RESTART_COOLDOWN="${JARVIS_CHROME_RESTART_COOLDOWN:-15s}"
 BROWSER_BINARY="${JARVIS_CHROME_BROWSER:-}"
-HYPRLAND_CONFIG="${HYPRLAND_CONFIG:-$HOME/.config/hypr/hyprland.conf}"
-HYPRLAND_BEGIN="# >>> jarvis-browser-proxy systemd env >>>"
-HYPRLAND_END="# <<< jarvis-browser-proxy systemd env <<<"
+HYPRLAND_CONFIG_EXPLICIT="${HYPRLAND_CONFIG:-}"
+HYPRLAND_CONFIG=""
+HYPRLAND_BEGIN=""
+HYPRLAND_END=""
 SERVICE_NAME="jarvis-browser-proxy.service"
 NON_INTERACTIVE=0
 CONFIGURE_HYPRLAND=0
@@ -96,16 +97,50 @@ prompt_yes_no() {
   esac
 }
 
+select_hyprland_config() {
+  if [[ -n "$HYPRLAND_CONFIG_EXPLICIT" ]]; then
+    HYPRLAND_CONFIG="$HYPRLAND_CONFIG_EXPLICIT"
+  elif [[ -f "$HOME/.config/hypr/hyprland.lua" ]]; then
+    HYPRLAND_CONFIG="$HOME/.config/hypr/hyprland.lua"
+  else
+    HYPRLAND_CONFIG="$HOME/.config/hypr/hyprland.conf"
+  fi
+
+  case "$HYPRLAND_CONFIG" in
+    *.lua)
+      HYPRLAND_BEGIN="-- >>> jarvis-browser-proxy systemd env >>>"
+      HYPRLAND_END="-- <<< jarvis-browser-proxy systemd env <<<"
+      ;;
+    *)
+      HYPRLAND_BEGIN="# >>> jarvis-browser-proxy systemd env >>>"
+      HYPRLAND_END="# <<< jarvis-browser-proxy systemd env <<<"
+      ;;
+  esac
+}
+
 hyprland_block_present() {
-  [[ -f "$HYPRLAND_CONFIG" ]] && grep -Fq "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG"
+  [[ -f "$HYPRLAND_CONFIG" ]] && grep -Fq -- "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG"
 }
 
 write_hyprland_block() {
-  cat <<EOF
+  case "$HYPRLAND_CONFIG" in
+    *.lua)
+      cat <<EOF
+$HYPRLAND_BEGIN
+hl.on("hyprland.start", function()
+  hl.exec_cmd([[sh -lc 'systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; if command -v dbus-update-activation-environment >/dev/null 2>&1; then dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; fi; systemctl --user restart $SERVICE_NAME']])
+end)
+$HYPRLAND_END
+EOF
+      ;;
+    *)
+      cat <<EOF
 $HYPRLAND_BEGIN
 exec-once = sh -lc 'systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; if command -v dbus-update-activation-environment >/dev/null 2>&1; then dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE; fi; systemctl --user restart $SERVICE_NAME'
 $HYPRLAND_END
 EOF
+      ;;
+  esac
 }
 
 append_hyprland_block() {
@@ -117,8 +152,8 @@ append_hyprland_block() {
 
 refresh_hyprland_block() {
   local begin_line end_line tmp
-  begin_line="$(grep -nF "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
-  end_line="$(grep -nF "$HYPRLAND_END" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
+  begin_line="$(grep -nF -- "$HYPRLAND_BEGIN" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
+  end_line="$(grep -nF -- "$HYPRLAND_END" "$HYPRLAND_CONFIG" | head -n 1 | cut -d: -f1 || true)"
 
   if [[ -z "$begin_line" || -z "$end_line" || "$end_line" -lt "$begin_line" ]]; then
     echo "Invalid managed Hyprland block in $HYPRLAND_CONFIG" >&2
@@ -156,7 +191,7 @@ maybe_configure_hyprland() {
     write_hyprland_block
     return 0
   fi
-  if prompt_yes_no "Amend $HYPRLAND_CONFIG with Hyprland exec-once lines for systemd user env import?"; then
+  if prompt_yes_no "Amend $HYPRLAND_CONFIG with a desktop-start hook for the systemd user environment?"; then
     append_hyprland_block
     log "Updated $HYPRLAND_CONFIG"
   else
@@ -198,6 +233,8 @@ maybe_enable_and_start_service() {
     log "Skipped enabling $SERVICE_NAME"
   fi
 }
+
+select_hyprland_config
 
 mkdir -p "$BIN_DIR" "$UNIT_DIR" "$CONFIG_DIR" "$STATE_DIR" "$PROFILE_DIR" "$DOWNLOADS_DIR"
 
